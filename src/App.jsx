@@ -4,7 +4,7 @@ import LeadList from "./Pages/LeadList";
 import AccountList from "./Pages/AccountList";
 
 function App() {
-  const [pageView, setPageView] = useState("Lead List");
+  const [pageView, setPageView] = useState("Account List");
 
   return (
     <div className="min-h-[20rem] min-w-[15rem] bg-blue-100">

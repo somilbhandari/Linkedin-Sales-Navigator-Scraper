@@ -1,11 +1,104 @@
 /* eslint-disable no-undef */
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { IoArrowDownCircleSharp, IoWarning } from "react-icons/io5";
 import Papa from "papaparse";
 
 const AccountList = () => {
   const [csvData, setCsvData] = useState("");
   const [tableSheetCount, setTableSheetCount] = useState(0);
+  const [autoScrap, setAutoScrap] = useState(false);
+  const [isChecking, setIsChecking] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
+  const hasScrapedRef = useRef(false);
+  const intervalRef = useRef(null);
+
+  // Load persisted state on mount
+  useEffect(() => {
+    chrome.storage.local.get(["autoScrapEnabled", "scrapedListData", "autoScrapStatus"], (result) => {
+      if (result.autoScrapEnabled !== undefined) {
+        setAutoScrap(result.autoScrapEnabled);
+      }
+      if (result.autoScrapStatus) {
+        setStatusMessage(result.autoScrapStatus);
+      }
+      if (result.scrapedListData) {
+        const existingData = result.scrapedListData;
+        const csv = (() => {
+          const nonEmptyColumns = [
+            "Name",
+            "ProfileURL",
+            "Location",
+            "Industry",
+            "Employees",
+            "Designation",
+            "Organization",
+            "OrganizationURL",
+            "About",
+          ].filter((column) =>
+            existingData.some(
+              (row) => row[column] && row[column].trim() !== ""
+            )
+          );
+          return Papa.unparse(existingData, {
+            columns: nonEmptyColumns,
+          });
+        })();
+        setCsvData(csv);
+        setTableSheetCount(existingData.length);
+        if (existingData.length > 0) {
+          hasScrapedRef.current = true;
+        }
+      }
+    });
+
+    // Poll for status updates from background script
+    const statusInterval = setInterval(() => {
+      chrome.storage.local.get(["autoScrapStatus", "scrapedListData", "autoScrapEnabled", "lastScrapedCount"], (result) => {
+        if (result.autoScrapStatus) {
+          setStatusMessage(result.autoScrapStatus);
+        }
+        if (result.autoScrapEnabled !== undefined) {
+          setAutoScrap(result.autoScrapEnabled);
+        }
+        if (result.scrapedListData && result.scrapedListData.length > 0) {
+          const existingData = result.scrapedListData;
+          const csv = (() => {
+            const nonEmptyColumns = [
+              "Name",
+              "ProfileURL",
+              "Location",
+              "Industry",
+              "Employees",
+              "Designation",
+              "Organization",
+              "OrganizationURL",
+              "About",
+            ].filter((column) =>
+              existingData.some(
+                (row) => row[column] && row[column].trim() !== ""
+              )
+            );
+            return Papa.unparse(existingData, {
+              columns: nonEmptyColumns,
+            });
+          })();
+          setCsvData(csv);
+          setTableSheetCount(existingData.length);
+          if (existingData.length > 0) {
+            hasScrapedRef.current = true;
+          }
+        } else {
+          // No data in storage
+          if (!result.scrapedListData || result.scrapedListData.length === 0) {
+            setCsvData("");
+            setTableSheetCount(0);
+          }
+        }
+      });
+    }, 500); // Poll every 500ms for status updates
+
+    return () => clearInterval(statusInterval);
+  }, []);
 
   const fetchListData = async () => {
     try {
@@ -133,10 +226,46 @@ const AccountList = () => {
           })();
           setCsvData(csv);
           setTableSheetCount(combinedData.length);
+          hasScrapedRef.current = true;
         });
       });
     } catch (error) {
       console.error("Error scraping list data", error);
+    }
+  };
+
+  // Auto-scrap effect - now handled by background script
+  // This useEffect is intentionally removed to prevent unwanted stop messages
+  // The toggle button handler now directly controls start/stop
+
+  const handleAutoScrapToggle = () => {
+    const newAutoScrapValue = !autoScrap;
+    
+    if (newAutoScrapValue) {
+      // Turning ON
+      hasScrapedRef.current = false;
+      setStatusMessage("Starting auto-scrap...");
+      setAutoScrap(newAutoScrapValue);
+      chrome.storage.local.set({ autoScrapEnabled: newAutoScrapValue });
+      
+      // Send message to background script to start auto-scraping
+      chrome.runtime.sendMessage({ action: "startAutoScrap" }, (response) => {
+        if (response && response.success) {
+          console.log("Background auto-scrap started");
+        }
+      });
+    } else {
+      // Turning OFF
+      setStatusMessage("");
+      setAutoScrap(newAutoScrapValue);
+      chrome.storage.local.set({ autoScrapEnabled: newAutoScrapValue });
+      
+      // Send message to background script to stop auto-scraping
+      chrome.runtime.sendMessage({ action: "stopAutoScrap" }, (response) => {
+        if (response && response.success) {
+          console.log("Background auto-scrap stopped");
+        }
+      });
     }
   };
 
@@ -158,15 +287,46 @@ const AccountList = () => {
   };
 
   const clearData = () => {
-    chrome.storage.local.remove("scrapedListData", () => {
+    chrome.storage.local.remove(["scrapedListData", "autoScrapEnabled", "autoScrapStatus"], () => {
       setCsvData("");
       setTableSheetCount(0);
+      hasScrapedRef.current = false;
+      setAutoScrap(false);
+      setStatusMessage("");
+      
+      // Clear badge on extension icon
+      chrome.action.setBadgeText({ text: "" });
+      
       console.log("Scraped data cleared.");
     });
   };
 
   return (
     <div className="p-2 space-y-3">
+      {/* Auto Scrap Toggle */}
+      <div className="p-2 bg-blue-50 rounded-lg space-y-2">
+        <div className="flex items-center justify-center gap-3">
+          <label className="text-sm font-medium text-gray-700">Auto scrap</label>
+          <button
+            onClick={handleAutoScrapToggle}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              autoScrap ? "bg-green-600" : "bg-gray-300"
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                autoScrap ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </button>
+        </div>
+        {statusMessage && autoScrap && (
+          <div className="text-xs text-center text-blue-700 bg-blue-100 p-2 rounded">
+            {statusMessage}
+          </div>
+        )}
+      </div>
+
       <h1 className="text-medium text-sm flex gap-2 items-center justify-center">
         <span className="h-1 w-1 rounded-full bg-black"></span>
         <span>
@@ -198,29 +358,35 @@ const AccountList = () => {
         </div>
       </div>
 
-      <div className="text-center">
-        <button
-          onClick={fetchListData}
-          className="py-2 px-4 bg-sky-600 rounded-lg cursor-pointer text-white"
-        >
-          Scrap This Table
-        </button>
-        <p className="my-2 text-blue-700">Total Rows: {tableSheetCount}</p>
+      <div className="text-center space-y-3">
+        <div>
+          <button
+            onClick={fetchListData}
+            className="py-2 px-4 bg-sky-600 rounded-lg cursor-pointer text-white"
+          >
+            Scrap This Table
+          </button>
+        </div>
 
-        {csvData && (
-          <div className="flex flex-col gap-2">
-            <button
-              onClick={downloadCsv}
-              className="py-2 px-4 bg-green-600 rounded-lg cursor-pointer text-white"
-            >
-              Download CSV
-            </button>
-            <button
-              onClick={clearData}
-              className="py-2 px-4 bg-red-600 rounded-lg cursor-pointer text-white"
-            >
-              Clear Data
-            </button>
+        {tableSheetCount > 0 && (
+          <div className="p-3 bg-green-50 rounded-lg space-y-2">
+            <p className="text-sm font-semibold text-green-800">
+              Total Rows Collected: {tableSheetCount}
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={downloadCsv}
+                className="py-2 px-4 bg-green-600 rounded-lg cursor-pointer text-white hover:bg-green-700 transition-colors"
+              >
+                Download CSV
+              </button>
+              <button
+                onClick={clearData}
+                className="py-2 px-4 bg-red-600 rounded-lg cursor-pointer text-white hover:bg-red-700 transition-colors"
+              >
+                Clear Data
+              </button>
+            </div>
           </div>
         )}
       </div>
